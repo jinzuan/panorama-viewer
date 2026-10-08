@@ -1,6 +1,6 @@
 <!doctype html>
-<!-- 全景图查看器 / Panorama Viewer v1.0.2 —— 单文件、零依赖、纯前端 WebGL 全景查看工具
-     v1.0.1 · 作者：金钻、苏达，及本项目全体贡献者们 · 以 MIT 协议开源（见 LICENSE） -->
+<!-- 全景图查看器 / Panorama Viewer v1.1.0 —— 单文件、零依赖、纯前端 WebGL 全景查看工具
+     作者：金钻、苏达，及本项目全体贡献者们 · 以 MIT 协议开源（见 LICENSE） -->
 <html lang="zh-CN" data-theme="auto">
 <head>
 <meta charset="utf-8">
@@ -308,7 +308,7 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
 </section>
 
 <div id="toast" role="status" aria-live="polite"></div>
-<input type="file" id="file" accept="image/*" class="visually-hidden" aria-hidden="true" tabindex="-1">
+<input type="file" id="file" accept="image/*,.hdr" class="visually-hidden" aria-hidden="true" tabindex="-1">
 
 <script>
 (function () {
@@ -345,7 +345,7 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
   var S = {};
   for (var k in DEFAULTS) S[k] = DEFAULTS[k];
   S.yaw = 0; S.pitch = 0; S.auto = false;
-  S.hasImage = false; S.imgLabel = '';
+  S.hasImage = false; S.imgLabel = ''; S.isHdr = false; S.hdrW = 0; S.hdrH = 0;
 
   /* ======================================================================
      2. WebGL
@@ -369,6 +369,7 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
     'uniform float uYaw, uPitch, uRoll;',
     'uniform vec2  uTan;',
     'uniform int   uMode;',              // 0 球面 / 1 立方体 / 2 圆柱
+    'uniform int   uHdr;',               // 1 = 贴图是 Radiance RGBE（HDR）
     'uniform float uExposure, uContrast, uSaturation;',
     'uniform float uTemp, uVignette, uSharp, uEdge;',
     'const float PI = 3.141592653589793;',
@@ -438,7 +439,10 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
     'vec3 fetch(vec2 frag, out float edge){',
     '  vec3 d = rayDir(frag);',
     '  vec2 uv = sampleUv(d, edge);',
-    '  return texture2D(uTex, uv).rgb;',
+    '  vec4 t = texture2D(uTex, uv);',
+    '  /* HDR：RGBe 解码回线性（A 字节存指数），同时保留负值范围 */',
+    '  if (uHdr == 1) return t.rgb * exp2(t.a * 255.0 - 128.0);',
+    '  return t.rgb;',
     '}',
     '',
     'void main(){',
@@ -453,8 +457,10 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
     '    blur += fetch(gl_FragCoord.xy + vec2( 0.0, -1.4), e2);',
     '    c += (c - blur * 0.25) * (uSharp * 1.6);',
     '  }',
-    '  /* 曝光 */',
+    '  /* 曝光（HDR 下就是「档」，线性空间里乘） */',
     '  c *= pow(2.0, uExposure);',
+    '  /* HDR：先色调映射（Reinhard）再编到 sRGB —— 线性数据直接当显示色会发灰发白 */',
+    '  if (uHdr == 1) { c = c / (1.0 + c); c = pow(clamp(c, 0.0, 1.0), vec3(0.4545)); }',
     '  /* 对比度（以中灰为轴） */',
     '  c = (c - 0.5) * uContrast + 0.5;',
     '  /* 色温：暖 → 抬红压蓝，冷 → 反之 */',
@@ -494,7 +500,7 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
     var loc = gl.getAttribLocation(prog, 'aPos');
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-    ['uTex', 'uRes', 'uYaw', 'uPitch', 'uRoll', 'uTan', 'uMode', 'uExposure', 'uContrast',
+    ['uTex', 'uRes', 'uYaw', 'uPitch', 'uRoll', 'uTan', 'uMode', 'uHdr', 'uExposure', 'uContrast',
       'uSaturation', 'uTemp', 'uVignette', 'uSharp', 'uEdge'].forEach(function (n) { U[n] = gl.getUniformLocation(prog, n); });
     maxTex = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE) || 4096, 8192);
     tex = gl.createTexture();
@@ -575,6 +581,7 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
     var tp = fovTans();
     gl.uniform2f(U.uTan, tp.x, tp.y);
     gl.uniform1i(U.uMode, S.mode === 'cube' ? 1 : (S.mode === 'cyl' ? 2 : 0));
+    gl.uniform1i(U.uHdr, S.isHdr ? 1 : 0);
     gl.uniform1f(U.uExposure, S.exposure);
     gl.uniform1f(U.uContrast, S.contrast);
     gl.uniform1f(U.uSaturation, S.saturation);
@@ -747,6 +754,9 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
     if (!document.fullscreenElement) { (el.requestFullscreen || el.webkitRequestFullscreen || function(){}).call(el); }
     else { (document.exitFullscreen || document.webkitExitFullscreen || function(){}).call(document); }
   }
+  /* 顶栏按钮绑定（bug：之前只有键盘 R/F 和双击，点了没反应） */
+  $('#btnReset').addEventListener('click', function () { resetView(true); });
+  $('#btnFull').addEventListener('click', toggleFull);
   document.addEventListener('fullscreenchange', function () { setTimeout(schedule, 60); });
 
   /* ======================================================================
@@ -854,9 +864,150 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
     clearTimeout(showHint._t); showHint._t = setTimeout(function () { h.classList.remove('on'); }, 3200);
   }
 
+  /* ---------------- HDR（Radiance RGBE .hdr）----------------
+     格式：文本头（#?RADIANCE / FORMAT=32-bit_rle_rgbe）→ 空行 → 一行分辨率 → 像素数据。
+     像素是每像素 4 字节 R,G,B,E；E 是指数：线性色 = RGB * 2^(E-128)。
+     上传时直接塞进 RGBA8 纹理（A 字节放 E），解码在着色器里做 —— 这样不用浮点纹理也能看 HDR。 */
+  function parseHDR(buf) {
+    var b = new Uint8Array(buf), p = 0;
+    function line() {
+      var s = '';
+      while (p < b.length && b[p] !== 10) { s += String.fromCharCode(b[p]); p++; }
+      p++;
+      return s;
+    }
+    if (line().indexOf('#?') !== 0) return null;
+    for (var i = 0; i < 64; i++) {
+      var l = line();
+      if (!l) break;
+    }
+    var m = /^([-+])([XY])\s+(\d+)\s+([-+])([XY])\s+(\d+)/.exec(line());
+    if (!m) return null;
+    /* 注意：数字属于它前面那个轴 —— "-Y 512 +X 1024" = 高 512、宽 1024 */
+    var a1 = m[3], a2 = m[6];
+    var h = parseInt(m[2] === 'Y' ? a1 : a2, 10);
+    var w = parseInt(m[2] === 'X' ? a1 : a2, 10);
+    if (!(w > 0 && h > 0) || w * h > 268435456) return null;
+    var flipY = (m[1] === '+'), flipX = (m[4] === '-');
+    var out = new Uint8Array(w * h * 4), scan = new Uint8Array(w * 4);
+    for (var y = 0; y < h; y++) {
+      var row = flipY ? (h - 1 - y) : y;
+      var off = row * w * 4;
+      if (w >= 8 && w < 32768 && b[p] === 2 && b[p + 1] === 2 && ((b[p + 2] << 8) | b[p + 3]) === w) {
+        p += 4;
+        for (var c = 0; c < 4; c++) {
+          var x = 0;
+          while (x < w) {
+            var n = b[p++];
+            if (n > 128) { n -= 128; var v = b[p++]; while (n-- > 0) { scan[x * 4 + c] = v; x++; } }
+            else { while (n-- > 0) { scan[x * 4 + c] = b[p++]; x++; } }
+          }
+        }
+        out.set(scan, off);
+      } else {
+        for (var k = 0; k < w * 4; k++) out[off + k] = b[p + k];
+        p += w * 4;
+      }
+      if (flipX) { for (var q = 0; q < w; q++) { var t = off + q * 4, u = off + (w - 1 - q) * 4;
+        var t0 = out[t], t1 = out[t+1], t2 = out[t+2], t3 = out[t+3];
+        out[t] = out[u]; out[t+1] = out[u+1]; out[t+2] = out[u+2]; out[t+3] = out[u+3];
+        out[u] = t0; out[u+1] = t1; out[u+2] = t2; out[u+3] = t3; } }
+    }
+    return { width: w, height: h, data: out };
+  }
+
+  /* HDR 上屏：不缩就别缩（不经过 canvas —— 2D canvas 会把 A 字节当 alpha 预乘，指数就毁了） */
+  function uploadHDR(hdr) {
+    var w = hdr.width, h = hdr.height, cap = maxTex, dx = hdr.data;
+    var scale = Math.min(1, cap / Math.max(w, h));
+    var tw = Math.max(2, Math.round(w * scale)), th = Math.max(2, Math.round(h * scale));
+    if (tw !== w || th !== h) {                       /* 太大 → 最近邻抽样（HDR 不做插值，保住数值） */
+      var small = new Uint8Array(tw * th * 4);
+      for (var y = 0; y < th; y++) {
+        var sy = Math.min(h - 1, Math.floor(y * h / th));
+        for (var x = 0; x < tw; x++) {
+          var sx = Math.min(w - 1, Math.floor(x * w / tw));
+          var a = (sy * w + sx) * 4, b2 = (y * tw + x) * 4;
+          small[b2] = dx[a]; small[b2 + 1] = dx[a + 1]; small[b2 + 2] = dx[a + 2]; small[b2 + 3] = dx[a + 3];
+        }
+      }
+      dx = small;
+    }
+    while (gl.getError() !== gl.NO_ERROR) {}
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    if (texReady) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tw, th, 0, gl.RGBA, gl.UNSIGNED_BYTE, dx);
+    if (gl.isContextLost()) return { ok: false, reason: 'lost', tried: tw };
+    var _e = gl.getError();
+    if (_e !== 0) return { ok: false, reason: 'toobig', tried: tw, dbg: 'err=0x' + _e.toString(16) + ' tw=' + tw + ' th=' + th + ' bytes=' + (dx && dx.length) };
+    texReady = true; texW = tw; texH = th;
+    return { ok: true, info: { w: w, h: h, tw: tw, th: th, scaled: (tw !== w || th !== h) } };
+  }
+
+  /* 小地图用：把 RGBE 抽样 + 色调映射成一张 LDR canvas */
+  function hdrThumb(hdr) {
+    var W = 256, H = 128, c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    var g = c.getContext('2d'), img = g.createImageData(W, H);
+    for (var y = 0; y < H; y++) {
+      var sy = Math.min(hdr.height - 1, Math.floor(y * hdr.height / H));
+      for (var x = 0; x < W; x++) {
+        var sx = Math.min(hdr.width - 1, Math.floor(x * hdr.width / W));
+        var a = (sy * hdr.width + sx) * 4, o = (y * W + x) * 4, e = Math.pow(2, hdr.data[a + 3] - 128);
+        for (var k = 0; k < 3; k++) {
+          var v = hdr.data[a + k] * e / 255;
+          v = v / (1 + v);                              /* Reinhard */
+          img.data[o + k] = Math.max(0, Math.min(255, Math.round(Math.pow(v, 0.4545) * 255)));
+        }
+        img.data[o + 3] = 255;
+      }
+    }
+    g.putImageData(img, 0, 0);
+    return c;
+  }
+
+  function startWithHDR(hdr, label) {
+    var res;
+    try { res = uploadHDR(hdr); } catch (e) { res = { ok: false, reason: 'toobig', tried: 1024 }; }
+    if (!res.ok) {
+      if (res.reason === 'lost') toast('显卡掉线了（显存被挤爆之类），刷新一下页面再试', 4200);
+      else toast('这张 HDR 这台设备装不下（缩到 ' + res.tried + 'px 还是不行）· 先压小一点再来', 4600);
+      return;
+    }
+    var info = res.info;
+    S.hasImage = true; S.isHdr = true; S.imgLabel = label || '';
+    S.hdrW = hdr.width; S.hdrH = hdr.height;
+    canvas.classList.remove('hidden');
+    $('#empty').classList.add('in');
+    resetView(false);
+    var src = Math.abs(hdr.width / hdr.height - 2) > 0.02 ? '（不是 2:1，投影会有点怪）' : '';
+    if (info.scaled) toast('HDR 太大，已缩到 ' + Math.max(info.tw, info.th) + 'px 上屏' + src, 3600);
+    else toast('HDR 已载入（' + hdr.width + '×' + hdr.height + '）· 拖「曝光」能看到高光里的细节 ' + src, 4200);
+    if (mapCtx) {
+      try { var t = hdrThumb(hdr); mapCtx.clearRect(0, 0, map.width, map.height);
+            mapCtx.drawImage(t, 0, 0, map.width, map.height); } catch (e) {}
+    }
+    showHint();
+    schedule();
+    document.title = (label ? label + ' · ' : '') + '全景图查看器';
+  }
+
+  function loadHDR(file) {
+    var fr = new FileReader();
+    fr.onload = function () {
+      var hdr = null;
+      try { hdr = parseHDR(fr.result); } catch (e) { hdr = null; }
+      if (!hdr) { toast('这个 .hdr 读不出来（本工具只认 Radiance RGBE 那种）', 4600); return; }
+      startWithHDR(hdr, file.name || 'image.hdr');
+    };
+    fr.onerror = function () { toast('这个 .hdr 读不出来', 4200); };
+    fr.readAsArrayBuffer(file);
+  }
+
   function loadFile(file) {
     if (!file) return;
-    if (!/^image\//.test(file.type)) { toast('这不是图片文件'); return; }
+    if (/\.hdr$/i.test(file.name || '') || /radiance/i.test(file.type || '')) { loadHDR(file); return; }
+    if (!/^image\//.test(file.type)) { toast('这不是图片文件（支持 PNG/JPG/WebP 和 Radiance .hdr）'); return; }
     var url = URL.createObjectURL(file);
     var img = new Image();
     img.onload = function () {
@@ -878,7 +1029,7 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
       return;
     }
     var info = res.info;
-    S.hasImage = true; S.imgLabel = label || '';
+    S.hasImage = true; S.imgLabel = label || ''; S.isHdr = false;
     canvas.classList.remove('hidden');
     $('#empty').classList.add('in');
     resetView(false);
