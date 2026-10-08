@@ -1,6 +1,6 @@
 <!doctype html>
 <!-- 全景图查看器 / Panorama Viewer —— 单文件、零依赖、纯前端 WebGL 全景查看工具
-     作者：金钻、苏达，及本项目全体贡献者们 · 以 MIT 协议开源（见 LICENSE） -->
+     v1.0.1 · 作者：金钻、苏达，及本项目全体贡献者们 · 以 MIT 协议开源（见 LICENSE） -->
 <html lang="zh-CN" data-theme="auto">
 <head>
 <meta charset="utf-8">
@@ -471,7 +471,7 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
     '}'
   ].join('\n');
 
-  var prog = null, U = {}, buf = null, tex = null, texReady = false, maxTex = 4096;
+  var prog = null, U = {}, buf = null, tex = null, texReady = false, texW = 0, texH = 0, maxTex = 4096;
 
   function compile(type, src) {
     var s = gl.createShader(type);
@@ -520,8 +520,14 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
     ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, 0, 0, cw, chh);
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    if (!texReady) { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c); texReady = true; }
-    else { gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, c); }
+    /* 尺寸变了必须重新分配：texSubImage2D 只允许往「同尺寸或更大」的纹理里写小块，
+       换图后尺寸不同会 INVALID_VALUE 静默失败 —— 表现就是「新图不替换、画面还是老图/花掉」 */
+    if (!texReady || cw !== texW || chh !== texH) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+      texReady = true; texW = cw; texH = chh;
+    } else {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+    }
     if (mapCtx) { mapCtx.clearRect(0, 0, map.width, map.height); mapCtx.drawImage(c, 0, 0, map.width, map.height); }
     return { w: w, h: h, tw: cw, th: chh };
   }
