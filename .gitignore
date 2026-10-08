@@ -1,0 +1,14 @@
+# 这个仓库对外开放，只放「发布用」的东西
+# 内部过程文件一律不进：
+notes/
+*.bak
+*.bak-*
+_shots/
+test*.js
+shot*.js
+probe*.js
+dbg*.js
+uxshots/
+.shots/
+*.log
+.DS_Store
