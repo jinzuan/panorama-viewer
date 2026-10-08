@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- 全景图查看器 / Panorama Viewer —— 单文件、零依赖、纯前端 WebGL 全景查看工具
+<!-- 全景图查看器 / Panorama Viewer v1.0.2 —— 单文件、零依赖、纯前端 WebGL 全景查看工具
      v1.0.1 · 作者：金钻、苏达，及本项目全体贡献者们 · 以 MIT 协议开源（见 LICENSE） -->
 <html lang="zh-CN" data-theme="auto">
 <head>
@@ -509,27 +509,56 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
     return true;
   }
 
-  /* 上传等距柱状图（必要时先缩到显卡能吃的尺寸） */
-  function uploadImage(img) {
+  /* 往显卡上试着传一次：传不上（抛错 / 静默失败 / 上下文掉了）就返回 null */
+  function tryUpload(img, scale) {
     var w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
-    if (!w || !h) return false;
-    var scale = Math.min(1, maxTex / Math.max(w, h));
     var cw = Math.max(2, Math.round(w * scale)), chh = Math.max(2, Math.round(h * scale));
     var c = document.createElement('canvas'); c.width = cw; c.height = chh;
     var ctx = c.getContext('2d');
     ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, 0, 0, cw, chh);
     gl.bindTexture(gl.TEXTURE_2D, tex);
+    while (gl.getError() !== gl.NO_ERROR) { /* 先清掉历史错误，下面才判得准 */ }
     /* 尺寸变了必须重新分配：texSubImage2D 只允许往「同尺寸或更大」的纹理里写小块，
-       换图后尺寸不同会 INVALID_VALUE 静默失败 —— 表现就是「新图不替换、画面还是老图/花掉」 */
+       换图后尺寸不同会 INVALID_VALUE 静默失败 —— 表现就是「新图不替换、画面还是老图」 */
     if (!texReady || cw !== texW || chh !== texH) {
+      /* 先把上一张卸掉：把已有纹理缩成 1×1，显存立刻还回去。
+         否则新旧两张同时占着（一张 8192×4096 就是 134MB，峰值翻倍）→ 手机直接装不下 */
+      if (texReady) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      texW = 0; texH = 0;
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
       texReady = true; texW = cw; texH = chh;
     } else {
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
     }
+    if (gl.isContextLost() || gl.getError() !== gl.NO_ERROR) { if (c) { c.width = 1; c.height = 1; } return null; }
     if (mapCtx) { mapCtx.clearRect(0, 0, map.width, map.height); mapCtx.drawImage(c, 0, 0, map.width, map.height); }
+    c.width = 1; c.height = 1;            /* 临时画布立刻放掉，别等 GC */
     return { w: w, h: h, tw: cw, th: chh };
+  }
+
+  /* 上传等距柱状图；装不下就往下退一档（8192 → 4096 → 2048 → 1024）再试，
+     而不是直接把人挡在门外 —— 缩一档绝大多数设备就能上屏了 */
+  function uploadImage(img) {
+    var w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+    if (!w || !h) return { ok: false, reason: 'empty' };
+    /* 档位按「缩出来的实际尺寸」去重：cap 8192 和 4096 对同一张图可能是同一个尺寸，只试一次 */
+    var caps = [maxTex, 8192, 4096, 2048, 1024], ladder = [], seen = {};
+    for (var i = 0; i < caps.length; i++) {
+      var cap = Math.min(caps[i], maxTex);
+      var sc = Math.min(1, cap / Math.max(w, h));
+      var dim = Math.round(w * sc) + 'x' + Math.round(h * sc);
+      if (seen[dim]) continue;
+      seen[dim] = 1; ladder.push(cap);
+    }
+    for (var j = 0; j < ladder.length; j++) {
+      var scale = Math.min(1, ladder[j] / Math.max(w, h));
+      var info = null;
+      try { info = tryUpload(img, scale); } catch (e) { info = null; }
+      if (info) { info.cap = ladder[j]; info.scaled = scale < 1; return { ok: true, info: info }; }
+      if (gl.isContextLost()) break;
+    }
+    return { ok: false, reason: gl.isContextLost() ? 'lost' : 'toobig', tried: ladder[ladder.length - 1] };
   }
 
   function draw() {
@@ -839,16 +868,24 @@ input[type=range]:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
   }
 
   function startWithImage(img, label) {
-    var info;
-    try { info = uploadImage(img); }
-    catch (err) { toast('显卡读不了这么大的图：' + (err && err.message ? err.message : err)); return; }
-    if (!info) { toast('图片是空的'); return; }
+    var res;
+    try { res = uploadImage(img); }
+    catch (err) { toast('这张图没能上屏：' + (err && err.message ? err.message : err), 4200); return; }
+    if (!res.ok) {
+      if (res.reason === 'empty') toast('这张图是空的，读不出来');
+      else if (res.reason === 'lost') toast('显卡掉线了（显存被挤爆之类），刷新一下页面再试', 4200);
+      else toast('这张图这台设备实在装不下（已经缩到 ' + res.tried + 'px 还是不行）。先把它压小一点再来～', 4600);
+      return;
+    }
+    var info = res.info;
     S.hasImage = true; S.imgLabel = label || '';
     canvas.classList.remove('hidden');
     $('#empty').classList.add('in');
     resetView(false);
     showHint();
-    if (Math.abs(info.w / info.h - 2) > 0.02) {
+    if (info.scaled) {
+      toast('图有点大，已自动缩到 ' + Math.max(info.tw, info.th) + 'px 上屏（画质够用，拖动不受影响）', 3000);
+    } else if (Math.abs(info.w / info.h - 2) > 0.02) {
       toast('提示：这张不是 2:1 的等距柱状图（' + info.w + '×' + info.h + '），投影看着会有点怪', 3200);
     }
     schedule();
